@@ -2,6 +2,10 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
+import http from "http";
+import { WebSocketServer } from "ws";
+
+import { IoC, Threat, CollabDocument, CollabUser, ChatMessage, CmsItem } from "./src/types";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -9,6 +13,7 @@ const __dirname = path.dirname(__filename);
 async function startServer() {
   try {
     const app = express();
+    const server = http.createServer(app);
     const PORT = 3000;
 
   app.use(express.json());
@@ -22,8 +27,9 @@ async function startServer() {
   });
 
   // Mock database of IoCs
-  let iocs = [
+  let iocs: IoC[] = [
     {
+      id: 'ioc-1',
       value: '45.33.2.1',
       type: 'IP',
       reputation: 'Malicious',
@@ -31,6 +37,7 @@ async function startServer() {
       tags: ['Ransomware', 'C2 Server']
     },
     {
+      id: 'ioc-2',
       value: 'hr-portal-secure.com',
       type: 'Domain',
       reputation: 'Suspicious',
@@ -38,6 +45,7 @@ async function startServer() {
       tags: ['Phishing', 'Credential Harvesting']
     },
     {
+      id: 'ioc-3',
       value: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
       type: 'Hash',
       reputation: 'Malicious',
@@ -48,7 +56,7 @@ async function startServer() {
 
   // System Logs and Alerts
   let logs: { id: string; timestamp: string; level: 'INFO' | 'WARN' | 'ERROR' | 'CRITICAL'; message: string; source: string }[] = [];
-  let alerts: { id: string; timestamp: string; severity: 'Critical' | 'High' | 'Medium'; message: string; type: string }[] = [];
+  let alerts: Threat[] = [];
   let attackMapData: { id: string; source: { lat: number; lng: number }; target: { lat: number; lng: number }; type: string; country?: string }[] = [];
   let isUnderAttack = false;
   const ipCache = new Map<string, { lat: number; lng: number; country: string }>();
@@ -202,7 +210,8 @@ async function startServer() {
       const data = await response.json();
 
       if (data.query_status === 'ok' && data.urls) {
-        const newIocs = data.urls.slice(0, 10).map((url: any) => ({
+        const newIocs: IoC[] = data.urls.slice(0, 10).map((url: any) => ({
+          id: `urlhaus-${url.id}`,
           value: url.url,
           type: 'URL',
           reputation: 'Malicious',
@@ -210,7 +219,8 @@ async function startServer() {
           tags: url.tags || ['Malware'],
           source: 'URLHaus'
         }));
-        iocs = [...newIocs, ...iocs].slice(0, 50);
+        const existingIocIds = new Set(newIocs.map(i => i.id));
+        iocs = [...newIocs, ...iocs.filter(i => !existingIocIds.has(i.id))].slice(0, 50);
 
         const newAlerts = data.urls.slice(0, 3).map((url: any) => ({
           id: `URLH-${url.id}`,
@@ -220,7 +230,9 @@ async function startServer() {
           type: 'Malware URL',
           source: 'URLHaus'
         }));
-        alerts = [...newAlerts, ...alerts].slice(0, 100);
+        
+        const existingAlertIds = new Set(newAlerts.map(a => a.id));
+        alerts = [...newAlerts, ...alerts.filter(a => !existingAlertIds.has(a.id))].slice(0, 100);
       }
     } catch (error) {
       console.error('Error fetching URLHaus data:', error);
@@ -237,7 +249,8 @@ async function startServer() {
       const data = await response.json();
 
       if (Array.isArray(data)) {
-        const newIocs = data.slice(0, 10).map((item: any) => ({
+        const newIocs: IoC[] = data.slice(0, 10).map((item: any) => ({
+          id: `feodo-${item.ip_address}-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
           value: item.ip_address,
           type: 'IP',
           reputation: 'Malicious',
@@ -245,17 +258,20 @@ async function startServer() {
           tags: [item.malware || 'Feodo'],
           source: 'Feodo Tracker'
         }));
-        iocs = [...newIocs, ...iocs].slice(0, 50);
+        const existingIocIds = new Set(newIocs.map(i => i.id));
+        iocs = [...newIocs, ...iocs.filter(i => !existingIocIds.has(i.id))].slice(0, 50);
 
         const newAlerts = data.slice(0, 2).map((item: any, index: number) => ({
-          id: `FEODO-${index}-${Date.now()}`,
+          id: `FEODO-${index}-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
           timestamp: new Date().toISOString(),
           severity: 'Critical' as const,
           message: `Feodo C2 IP detected: ${item.ip_address}`,
           type: 'C2 Server',
           source: 'Feodo Tracker'
         }));
-        alerts = [...newAlerts, ...alerts].slice(0, 100);
+        
+        const existingAlertIds = new Set(newAlerts.map(a => a.id));
+        alerts = [...newAlerts, ...alerts.filter(a => !existingAlertIds.has(a.id))].slice(0, 100);
       }
     } catch (error) {
       console.error('Error fetching Feodo Tracker data:', error);
@@ -284,26 +300,35 @@ async function startServer() {
           
           if (eventData.Event) {
             const event = eventData.Event;
-            newAlerts.push({
+            const newAlert: Threat = {
               id: `MISP-${event.id}`,
               timestamp: new Date().toISOString(),
-              severity: event.threat_level_id === '1' ? 'Critical' : 'High',
+              severity: event.threat_level_id === '1' ? 'Critical' as const : 'High' as const,
               message: `MISP Event: ${event.info}`,
               type: 'MISP Event',
               source: 'CIRCL MISP'
-            });
+            };
+            
+            if (!alerts.some(a => a.id === newAlert.id)) {
+              alerts = [newAlert, ...alerts].slice(0, 100);
+            }
 
             if (event.Attribute) {
               event.Attribute.slice(0, 5).forEach((attr: any) => {
                 if (['ip-src', 'ip-dst', 'domain', 'hostname', 'md5', 'sha1', 'sha256'].includes(attr.type)) {
-                  newIocs.push({
+                  const newIocEntry: IoC = {
+                    id: `misp-${attr.id}`,
                     value: attr.value,
                     type: attr.type.includes('ip') ? 'IP' : attr.type.includes('domain') || attr.type.includes('hostname') ? 'Domain' : 'Hash',
                     reputation: 'Malicious',
                     lastSeen: new Date().toISOString(),
                     tags: [attr.category],
                     source: 'CIRCL MISP'
-                  });
+                  };
+                  
+                  if (!iocs.some(i => i.id === newIocEntry.id)) {
+                    iocs = [newIocEntry, ...iocs].slice(0, 50);
+                  }
                 }
               });
             }
@@ -346,14 +371,19 @@ async function startServer() {
 
               for (const ioc of recentIoCs) {
                 // Add to global IoCs
-                iocs = [{
-                  value: ioc.ioc.split(':')[0],
-                  type: ioc.ioc_type === 'ip:port' ? 'IP' : ioc.ioc_type === 'domain' ? 'Domain' : 'Hash',
-                  reputation: 'Malicious',
-                  lastSeen: new Date().toISOString(),
-                  tags: [ioc.threat_type_desc],
-                  source: 'ThreatFox'
-                }, ...iocs].slice(0, 50);
+                  const newIocEntry: IoC = {
+                    id: `tf-${ioc.id}`,
+                    value: ioc.ioc.split(':')[0],
+                    type: ioc.ioc_type === 'ip:port' ? 'IP' : ioc.ioc_type === 'domain' ? 'Domain' : 'Hash',
+                    reputation: 'Malicious',
+                    lastSeen: new Date().toISOString(),
+                    tags: [ioc.threat_type_desc],
+                    source: 'ThreatFox'
+                  };
+                  
+                  if (!iocs.some(i => i.id === newIocEntry.id)) {
+                    iocs = [newIocEntry, ...iocs].slice(0, 50);
+                  }
 
                 // Only process IPs or domains we can resolve/geolocate
                 if (ioc.ioc_type === 'ip:port' || ioc.ioc_type === 'domain') {
@@ -388,6 +418,7 @@ async function startServer() {
                   if (geo) {
                     newAttacks.push({
                       id: ioc.id,
+                      ip: targetIp,
                       source: { lat: geo.lat, lng: geo.lng },
                       target: {
                         lat: 37.7749 + (Math.random() * 4 - 2), // US Target for visualization
@@ -401,7 +432,9 @@ async function startServer() {
               }
 
               if (newAttacks.length > 0) {
-                attackMapData = [...newAttacks, ...attackMapData].slice(0, 20);
+                const existingAttackIds = new Set(attackMapData.map(a => a.id));
+                const uniqueNewAttacks = newAttacks.filter(a => !existingAttackIds.has(a.id));
+                attackMapData = [...uniqueNewAttacks, ...attackMapData].slice(0, 20);
               }
             }
           } catch (e) {
@@ -419,6 +452,7 @@ async function startServer() {
   const generateMockAttack = () => {
     const newAttack = {
       id: Math.random().toString(36).substr(2, 9),
+      ip: `192.168.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`,
       source: {
         lat: (Math.random() * 140) - 70,
         lng: (Math.random() * 360) - 180
@@ -547,10 +581,404 @@ async function startServer() {
     res.json(threatActors);
   });
 
+  // --- CMS STORE & API ENDPOINTS ---
+  let cmsItems: CmsItem[] = [
+    {
+      id: "cms-item-1",
+      title: "The Rise of Zero-Day Exploits in Industrial IoT Devices",
+      type: "article",
+      category: "Threat Intel",
+      content: "Over the past six months, we have observed a marked increase in zero-day exploitation targeting operational technology (OT) and industrial internet of things (IIoT) firmware layers. Threat actors, specifically APT-41, are bypassing standard firewall policy controls through web shell injections and device telemetry interface overflows. Initial entry vectors frequently exploit obsolete RPC endpoints or unpatched security policies in administrative dashboards.\n\nRecommended remediations include:\n1. Strict micro-segmentation of all OT and telemetry devices.\n2. Disabling unencrypted administrative web consoles.\n3. Continuous integrity checking of device firmware signatures.",
+      summary: "An analytical review of advanced persistent threats leveraging firmware-level overrides on IIoT controllers.",
+      status: "Published",
+      author: "Lead Threat Hunter Zeta",
+      createdAt: "2026-05-10T10:00:00Z",
+      updatedAt: "2026-05-12T14:30:00Z",
+      tags: ["IoT", "APT-41", "Zero-Day"]
+    },
+    {
+      id: "cms-item-2",
+      title: "System Security Hardening Guide: Windows AD & Kerberos",
+      type: "document",
+      category: "SOC Guides",
+      content: "Technical documentation outlining exact Group Policy (GPO) and Active Directory configurations. Includes steps for setting up Kerberos Armoring (FAST), restricting NTLM auth, and disabling RC4 encryption algorithms in corporate domains. Detailed steps are provided to configure secure RPC interactions and block lateral movement avenues within the AD database structure.",
+      summary: "GPO template guidelines and technical steps to secure Windows server infrastructures and Active Directory.",
+      status: "Published",
+      author: "Senior Security Engineer Alpha",
+      createdAt: "2026-05-15T08:00:00Z",
+      updatedAt: "2026-05-15T08:00:00Z",
+      tags: ["Active Directory", "Hardening", "GPO"],
+      fileName: "AD_Hardening_Standardv4.pdf",
+      fileSize: "2.4 MB",
+      mimeType: "application/pdf"
+    },
+    {
+      id: "cms-item-3",
+      title: "Interactive Threat Vector Infographic: Ransomware Kill Chain",
+      type: "multimedia",
+      category: "Vulnerability",
+      content: "Visual sequence showing credential access -> privilege escalation -> defense evasion -> credential dumping -> lateral movement -> volume shadow copy deletion -> file system encryption. Crucial educational media asset designed for internal staff security briefings and cyber security awareness programs.",
+      summary: "A structured visual flow of modern double-extortion ransomware operations from compromise to payout.",
+      status: "Under Review",
+      author: "UX SecOps Lead Gamma",
+      createdAt: "2026-05-18T11:20:00Z",
+      updatedAt: "2026-05-19T16:15:00Z",
+      tags: ["Ransomware", "Infographic", "TTPs"],
+      fileName: "ransomware_kill_chain_v1.png",
+      fileSize: "5.1 MB",
+      mimeType: "image/png"
+    }
+  ];
+
+  // Get all CMS items
+  app.get("/api/cms/items", (req, res) => {
+    res.json(cmsItems);
+  });
+
+  // Get a single CMS item
+  app.get("/api/cms/items/:id", (req, res) => {
+    const item = cmsItems.find(x => x.id === req.params.id);
+    if (!item) {
+      return res.status(404).json({ error: "CMS item not found" });
+    }
+    res.json(item);
+  });
+
+  // Create a CMS item
+  app.post("/api/cms/items", (req, res) => {
+    const { title, type, category, content, summary, status, author, tags, fileUrl, fileName, fileSize, mimeType } = req.body;
+    
+    if (!title || !type || !category || !content) {
+      return res.status(400).json({ error: "Title, type, category, and content are required parameters" });
+    }
+
+    const newItem: CmsItem = {
+      id: `cms-item-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+      title,
+      type,
+      category,
+      content,
+      summary: summary || "",
+      status: status || "Draft",
+      author: author || "Administrator",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tags: tags || [],
+      fileUrl,
+      fileName,
+      fileSize,
+      mimeType
+    };
+
+    cmsItems.push(newItem);
+    res.status(201).json(newItem);
+  });
+
+  // Update a CMS item
+  app.put("/api/cms/items/:id", (req, res) => {
+    const { title, type, category, content, summary, status, author, tags, fileUrl, fileName, fileSize, mimeType } = req.body;
+    const index = cmsItems.findIndex(x => x.id === req.params.id);
+    
+    if (index === -1) {
+      return res.status(404).json({ error: "CMS item not found" });
+    }
+
+    const currentItem = cmsItems[index];
+    const updatedItem: CmsItem = {
+      ...currentItem,
+      title: title !== undefined ? title : currentItem.title,
+      type: type !== undefined ? type : currentItem.type,
+      category: category !== undefined ? category : currentItem.category,
+      content: content !== undefined ? content : currentItem.content,
+      summary: summary !== undefined ? summary : currentItem.summary,
+      status: status !== undefined ? status : currentItem.status,
+      author: author !== undefined ? author : currentItem.author,
+      tags: tags !== undefined ? tags : currentItem.tags,
+      fileUrl: fileUrl !== undefined ? fileUrl : currentItem.fileUrl,
+      fileName: fileName !== undefined ? fileName : currentItem.fileName,
+      fileSize: fileSize !== undefined ? fileSize : currentItem.fileSize,
+      mimeType: mimeType !== undefined ? mimeType : currentItem.mimeType,
+      updatedAt: new Date().toISOString()
+    };
+
+    cmsItems[index] = updatedItem;
+    res.json(updatedItem);
+  });
+
+  // Delete a CMS item
+  app.delete("/api/cms/items/:id", (req, res) => {
+    const index = cmsItems.findIndex(x => x.id === req.params.id);
+    if (index === -1) {
+      return res.status(404).json({ error: "CMS item not found" });
+    }
+    cmsItems.splice(index, 1);
+    res.json({ success: true, message: "CMS item successfully deleted" });
+  });
+
+  // --- REAL-TIME COLLABORATION STORE ---
+  const collabDocs: Record<string, CollabDocument> = {
+    'incident-report-1': {
+      id: 'incident-report-1',
+      title: 'Incident Report: FEODO C2 Network Breach',
+      category: 'Incident Response',
+      content: `# Incident Report: FEODO C2 Network Breach\n\n**Date:** 2026-05-23\n**Status:** INVESTIGATING\n**Lead Analyst:** Level-3 Security Operator\n\n## 1. Executive Summary\nOn 2026-05-23, our intrusion detection systems triggered critical alerts indicating outbound tunneling attempts to verified Feodo Botnet command-and-control servers. Micro-segmentation policies are currently being verified, and perimeter blocklists have been updated.\n\n## 2. Chronological Timeline\n- **17:36:00** - Initial alerts raised regarding outbound traffic from Host 10.0.0.45 on Port 443.\n- **17:38:00** - Threat feed queried, matching Destination IP 45.33.2.1 to known Feodo infrastructure.\n- **17:40:00** - Containment protocols activated.\n\n## 3. Recommended Actions\n- Isolate VLAN and perform memory dumps of the affected system.\n- Revoke valid session keys and administrative tokens.`,
+      lastUpdated: new Date().toISOString(),
+      updatedBy: 'System'
+    },
+    'security-charter': {
+      id: 'security-charter',
+      title: 'Sentinel SOC Security Operations Policy',
+      category: 'Policy',
+      content: `# Sentinel SOC Security Operations Policy\n\n## 1. Purpose & Objectives\nThis charter outlines the standard operational response procedures, containment guidelines, and investigative timelines required by the Security Operations Center (SOC) team during active campaign events.\n\n## 2. Severity Classification Matrix\n- **Critical (P1)**: Volumetric compromise or active ransomware infection. Response SLA: 10 minutes.\n- **High (P2)**: Multi-stage lateral movement or confirmed persistent access inside production networks. Response SLA: 30 minutes.\n- **Medium (P3)**: Scanning activity or isolated commodity malware. Response SLA: 4 hours.`,
+      lastUpdated: new Date().toISOString(),
+      updatedBy: 'System'
+    },
+    'apt28-intel-card': {
+      id: 'apt28-intel-card',
+      title: 'Threat Intelligence Briefing: APT28 (Fancy Bear)',
+      category: 'Threat Intel',
+      content: `# Threat Intelligence Briefing: APT28\n\n## 1. Actor Profile\nAPT28 (Fancy Bear, Sofacy) is a highly disciplined threat adversary executing strategic cyber campaigns since at least 2004. Primary objectives lean towards strategic intelligence collection focusing on defense, political institutions, and infrastructure.\n\n## 2. Core TTPs Leveraged\n- **T1566.001 (Spearphishing Attachment)**: Crafting highly convincing emails with customized macro-embedded attachments.\n- **T1059.001 (PowerShell Execution)**: Utilizing custom reflective loaders to run secondary malicious payloads directly inside memory blocks.\n\n## 3. Verified Mitigations\n- Restrict PowerShell script executions to certified directories.\n- Enable strict mail filtering and SPF/DKIM/DMARC analysis.`,
+      lastUpdated: new Date().toISOString(),
+      updatedBy: 'System'
+    }
+  };
+
+  const collabChats: Record<string, ChatMessage[]> = {
+    'incident-report-1': [],
+    'security-charter': [],
+    'apt28-intel-card': []
+  };
+
+  // --- REST ENDPOINTS FOR COLLABORATION ---
+  app.get("/api/collab/documents", (req, res) => {
+    const docsArray = Object.values(collabDocs).map(doc => ({
+      id: doc.id,
+      title: doc.title,
+      category: doc.category,
+      lastUpdated: doc.lastUpdated,
+      updatedBy: doc.updatedBy
+    }));
+    res.json(docsArray);
+  });
+
+  app.get("/api/collab/documents/:id", (req, res) => {
+    const doc = collabDocs[req.params.id];
+    if (!doc) {
+      return res.status(404).json({ error: "Document not found" });
+    }
+    res.json(doc);
+  });
+
+  // --- WEBSOCKET REAL-TIME SYNC LOGIC ---
+  const wss = new WebSocketServer({ noServer: true });
+  const connectedClients = new Map<any, {
+    id: string;
+    username: string;
+    color: string;
+    documentId?: string;
+  }>();
+
+  // Helper: Find all connected users in a room
+  const getRoomUsers = (documentId: string): CollabUser[] => {
+    const users: CollabUser[] = [];
+    connectedClients.forEach((info) => {
+      if (info.documentId === documentId) {
+        users.push({
+          id: info.id,
+          username: info.username,
+          color: info.color,
+          lastActive: new Date().toISOString()
+        });
+      }
+    });
+    return users;
+  };
+
+  // Helper: Broadcast to room
+  const broadcastToRoom = (documentId: string, messageObj: any, excludeWs?: any) => {
+    const msgStr = JSON.stringify(messageObj);
+    connectedClients.forEach((info, ws) => {
+      if (info.documentId === documentId && ws !== excludeWs && ws.readyState === 1) {
+        ws.send(msgStr);
+      }
+    });
+  };
+
+  wss.on('connection', (ws) => {
+    const clientId = `user-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+    
+    // Set initial client state with defaults
+    connectedClients.set(ws, {
+      id: clientId,
+      username: 'Anonymous User',
+      color: '#A1A1AA'
+    });
+
+    ws.on('message', (message) => {
+      let parsed: any;
+      try {
+        parsed = JSON.parse(message.toString());
+      } catch (e) {
+        return;
+      }
+
+      const clientInfo = connectedClients.get(ws);
+      if (!clientInfo) return;
+
+      switch (parsed.type) {
+        case 'join': {
+          const { documentId, username, color } = parsed;
+          clientInfo.documentId = documentId;
+          clientInfo.username = username || 'Anonymous User';
+          clientInfo.color = color || '#A1A1AA';
+
+          // Join document state check
+          if (collabDocs[documentId]) {
+            // Send initial document state and message history
+            ws.send(JSON.stringify({
+              type: 'init',
+              content: collabDocs[documentId].content,
+              chatHistory: collabChats[documentId] || []
+            }));
+
+            // Notify everyone in the room about presence update
+            const users = getRoomUsers(documentId);
+            broadcastToRoom(documentId, {
+              type: 'presence_update',
+              users
+            });
+
+            // Create and log system chat announcement
+            const sysMsg: ChatMessage = {
+              id: `sys-${Date.now()}`,
+              documentId,
+              sender: 'System',
+              color: '#10B981',
+              text: `${clientInfo.username} joined the session`,
+              timestamp: new Date().toISOString()
+            };
+            collabChats[documentId] = collabChats[documentId] || [];
+            collabChats[documentId].push(sysMsg);
+            if (collabChats[documentId].length > 100) collabChats[documentId].shift();
+
+            broadcastToRoom(documentId, {
+              type: 'chat',
+              message: sysMsg
+            });
+          }
+          break;
+        }
+
+        case 'edit': {
+          const { documentId, content } = parsed;
+          if (collabDocs[documentId]) {
+            collabDocs[documentId].content = content;
+            collabDocs[documentId].lastUpdated = new Date().toISOString();
+            collabDocs[documentId].updatedBy = clientInfo.username;
+
+            // Broadcast edit update to other players
+            broadcastToRoom(documentId, {
+              type: 'edit',
+              documentId,
+              content,
+              updatedBy: clientInfo.username
+            }, ws);
+          }
+          break;
+        }
+
+        case 'cursor': {
+          const { documentId, cursor } = parsed;
+          broadcastToRoom(documentId, {
+            type: 'cursor_update',
+            userId: clientInfo.id,
+            username: clientInfo.username,
+            color: clientInfo.color,
+            cursor
+          }, ws);
+          break;
+        }
+
+        case 'chat': {
+          const { documentId, text } = parsed;
+          if (collabChats[documentId]) {
+            const newChat: ChatMessage = {
+              id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+              documentId,
+              sender: clientInfo.username,
+              color: clientInfo.color,
+              text,
+              timestamp: new Date().toISOString()
+            };
+
+            collabChats[documentId].push(newChat);
+            if (collabChats[documentId].length > 100) collabChats[documentId].shift();
+
+            // Broadcast message back to everyone
+            broadcastToRoom(documentId, {
+              type: 'chat',
+              message: newChat
+            });
+          }
+          break;
+        }
+      }
+    });
+
+    ws.on('close', () => {
+      const clientInfo = connectedClients.get(ws);
+      if (clientInfo && clientInfo.documentId) {
+        const documentId = clientInfo.documentId;
+        connectedClients.delete(ws);
+
+        // Send a system message to chat history
+        const sysMsg: ChatMessage = {
+          id: `sys-${Date.now()}`,
+          documentId,
+          sender: 'System',
+          color: '#EF4444',
+          text: `${clientInfo.username} left the session`,
+          timestamp: new Date().toISOString()
+        };
+        if (collabChats[documentId]) {
+          collabChats[documentId].push(sysMsg);
+          if (collabChats[documentId].length > 100) collabChats[documentId].shift();
+        }
+
+        broadcastToRoom(documentId, {
+          type: 'chat',
+          message: sysMsg
+        });
+
+        // Broadcast presence update
+        const users = getRoomUsers(documentId);
+        broadcastToRoom(documentId, {
+          type: 'presence_update',
+          users
+        });
+      } else {
+        connectedClients.delete(ws);
+      }
+    });
+  });
+
+  // Attach WebSocket to same HTTP port handler
+  server.on('upgrade', (request, socket, head) => {
+    const url = new URL(request.url || '', `http://${request.headers.host}`);
+    if (url.pathname === '/ws-collab') {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit('connection', ws, request);
+      });
+    } else {
+      socket.destroy();
+    }
+  });
+
   // Simulate new IoCs being added periodically
   setInterval(() => {
     const newIoC = {
-      value: `192.168.1.${Math.floor(Math.random() * 255)}`,
+      id: `ioc-${Math.random().toString(36).substr(2, 5)}`,
+      value: `192.168.1.${Math.floor(Math.random() * 254) + 1}`,
       type: 'IP' as const,
       reputation: 'Suspicious' as const,
       lastSeen: new Date().toISOString(),
@@ -598,7 +1026,7 @@ async function startServer() {
     next(err);
   });
 
-  app.listen(PORT, "0.0.0.0", () => {
+  server.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
   } catch (error) {
